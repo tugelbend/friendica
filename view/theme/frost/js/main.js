@@ -417,12 +417,10 @@
 			elemName = elems + ' ' + elemName;
 		}
 		$(elemName).each(function() {
-			if($(this).height() > 450) {
-				$('html').height($('html').height());
-				$(this).divgrow({ initialHeight: 400, showBrackets: false, speed: 0 });
-				$(this).addClass('divmore');
-				$('html').height('auto');
-			}					
+			$('html').height($('html').height());
+			$(this).readmore({maxheight:450 , moreLink:'<a href="#" class="showmore">+ Show more</a>', lessLink:'<a href="#" class="showmore">+ Show less</a>'});
+			$(this).addClass('divmore');
+			$('html').height('auto');
 		});
 	}
 

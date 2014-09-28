@@ -1404,7 +1404,7 @@ input#dfrn-url {
 	-webkit-box-shadow: none;
 }
 
-.divgrow-showmore {
+.showmore {
 	display: block;
 	clear: both;
 	text-align: center;

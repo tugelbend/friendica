@@ -7,7 +7,6 @@
   tinyMCE.init({ mode : "none"});
 </script>-->*}}
 {{*<!--<script type="text/javascript" src="{{$baseurl}}/js/jquery.js" ></script>
-<script type="text/javascript" src="{{$baseurl}}/view/theme/decaf-mobile/js/jquery.divgrow-1.3.1.f1.js" ></script>
 <script type="text/javascript" src="{{$baseurl}}/js/jquery.textinputs.js" ></script>
 <script type="text/javascript" src="{{$baseurl}}/view/theme/decaf-mobile/js/fk.autocomplete.js" ></script>-->*}}
 {{*<!--<script type="text/javascript" src="{{$baseurl}}/library/colorbox/jquery.colorbox-min.js"></script>-->*}}
