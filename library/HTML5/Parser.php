@@ -17,6 +17,17 @@ class HTML5_Parser
      * @return Parsed HTML as DOMDocument
      */
     static public function parse($text, $builder = null) {
+
+	// Cleanup invalid HTML
+	$doc = new DOMDocument();
+
+	if (mb_detect_encoding($text, "UTF-8", true) == "UTF-8")
+		@$doc->loadHTML('<?xml encoding="UTF-8" ?>'.$text);
+	else
+		@$doc->loadHTML($text);
+
+	$text = $doc->saveHTML();
+
         $tokenizer = new HTML5_Tokenizer($text, $builder);
         $tokenizer->parse();
         return $tokenizer->save();

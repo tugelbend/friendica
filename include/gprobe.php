@@ -10,7 +10,7 @@ function gprobe_run(&$argv, &$argc){
 	if(is_null($a)) {
 		$a = new App;
 	}
-  
+
 	if(is_null($db)) {
 	    @include(".htconfig.php");
     	require_once("include/dba.php");
@@ -37,9 +37,27 @@ function gprobe_run(&$argv, &$argc){
 		dbesc(normalise_link($url))
 	);
 
+	logger("gprobe start for ".normalise_link($url), LOGGER_DEBUG);
+
 	if(! count($r)) {
 
+		// Is it a DDoS attempt?
+		$urlparts = parse_url($url);
+
+		$result = Cache::get("gprobe:".$urlparts["host"]);
+		if (!is_null($result)) {
+			$result = unserialize($result);
+			if ($result["network"] == NETWORK_FEED) {
+				logger("DDoS attempt detected for ".$urlparts["host"]." by ".$_SERVER["REMOTE_ADDR"].". server data: ".print_r($_SERVER, true), LOGGER_DEBUG);
+				return;
+			}
+		}
+
 		$arr = probe_url($url);
+
+		if (is_null($result))
+			Cache::set("gprobe:".$urlparts["host"],serialize($arr));
+
 		if(count($arr) && x($arr,'network') && $arr['network'] === NETWORK_DFRN) {
 			q("insert into `gcontact` (`name`,`url`,`nurl`,`photo`)
 				values ( '%s', '%s', '%s', '%s') ",
@@ -55,11 +73,12 @@ function gprobe_run(&$argv, &$argc){
 	}
 	if(count($r))
 		poco_load(0,0,$r[0]['id'], str_replace('/profile/','/poco/',$r[0]['url']));
-		
+
+	logger("gprobe end for ".normalise_link($url), LOGGER_DEBUG);
 	return;
 }
 
 if (array_search(__file__,get_included_files())===0){
-  gprobe_run($argv,$argc);
+  gprobe_run($_SERVER["argv"],$_SERVER["argc"]);
   killme();
 }

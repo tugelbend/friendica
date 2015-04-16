@@ -26,6 +26,19 @@
 		return false;
 	}
 
+	function api_source() {
+		if (requestdata('source'))
+			return (requestdata('source'));
+
+		// Support for known clients that doesn't send a source name
+		if (strstr($_SERVER['HTTP_USER_AGENT'], "Twidere"))
+			return ("Twidere");
+
+		logger("Unrecognized user-agent ".$_SERVER['HTTP_USER_AGENT'], LOGGER_DEBUG);
+
+		return ("api");
+	}
+
 	function api_date($str){
 		//Wed May 23 06:01:13 +0000 2007
 		return datetime_convert('UTC', 'UTC', $str, "D M d H:i:s +0000 Y" );
@@ -83,24 +96,49 @@
 		}
 
 		$user = $_SERVER['PHP_AUTH_USER'];
-		$encrypted = hash('whirlpool',trim($_SERVER['PHP_AUTH_PW']));
+		$password = $_SERVER['PHP_AUTH_PW'];
+		$encrypted = hash('whirlpool',trim($password));
 
 
 		/**
 		 *  next code from mod/auth.php. needs better solution
 		 */
+		$record = null;
 
-		// process normal login request
-
-		$r = q("SELECT * FROM `user` WHERE ( `email` = '%s' OR `nickname` = '%s' )
-			AND `password` = '%s' AND `blocked` = 0 AND `account_expired` = 0 AND `account_removed` = 0 AND `verified` = 1 LIMIT 1",
-			dbesc(trim($user)),
-			dbesc(trim($user)),
-			dbesc($encrypted)
+		$addon_auth = array(
+			'username' => trim($user), 
+			'password' => trim($password),
+			'authenticated' => 0,
+			'user_record' => null
 		);
-		if(count($r)){
-			$record = $r[0];
-		} else {
+
+		/**
+		 *
+		 * A plugin indicates successful login by setting 'authenticated' to non-zero value and returning a user record
+		 * Plugins should never set 'authenticated' except to indicate success - as hooks may be chained
+		 * and later plugins should not interfere with an earlier one that succeeded.
+		 *
+		 */
+
+		call_hooks('authenticate', $addon_auth);
+
+		if(($addon_auth['authenticated']) && (count($addon_auth['user_record']))) {
+			$record = $addon_auth['user_record'];
+		}
+		else {
+			// process normal login request
+
+			$r = q("SELECT * FROM `user` WHERE ( `email` = '%s' OR `nickname` = '%s' )
+				AND `password` = '%s' AND `blocked` = 0 AND `account_expired` = 0 AND `account_removed` = 0 AND `verified` = 1 LIMIT 1",
+				dbesc(trim($user)),
+				dbesc(trim($user)),
+				dbesc($encrypted)
+			);
+			if(count($r))
+				$record = $r[0];
+		}
+
+		if((! $record) || (! count($record))) {
 			logger('API_login failure: ' . print_r($_SERVER,true), LOGGER_DEBUG);
 			header('WWW-Authenticate: Basic realm="Friendica"');
 			header('HTTP/1.0 401 Unauthorized');
@@ -153,7 +191,10 @@
 					case "json":
 						header ("Content-Type: application/json");
 						foreach($r as $rr)
-							return json_encode($rr);
+							$json = json_encode($rr);
+							if ($_GET['callback'])
+								$json = $_GET['callback']."(".$json.")";
+							return $json;
 						break;
 					case "rss":
 						header ("Content-Type: application/rss+xml");
@@ -181,6 +222,7 @@
 	}
 
 	function api_error(&$a, $type, $error) {
+		# TODO:  https://dev.twitter.com/overview/api/response-codes
 		$r = "<status><error>".$error."</error><request>".$a->query_string."</request></status>";
 		switch($type){
 			case "xml":
@@ -665,6 +707,7 @@
 			logger('api_statuses_update: no user');
 			return false;
 		}
+
 		$user_info = api_get_user($a);
 
 		// convert $_POST array items to the form we use for web posts.
@@ -690,8 +733,7 @@
 				$_REQUEST['body'] = html2bbcode($txt);
 			}
 
-		}
-		else
+		} else
 			$_REQUEST['body'] = requestdata('status');
 
 		$_REQUEST['title'] = requestdata('title');
@@ -709,22 +751,82 @@
 		if($parent)
 			$_REQUEST['type'] = 'net-comment';
 		else {
-//			logger("api_statuses_update: upload ".print_r($_FILES, true)." ".print_r($_POST, true)." ".print_r($_GET, true), LOGGER_DEBUG);
-//die("blubb");
-			$_REQUEST['type'] = 'wall';
-			if(x($_FILES,'media')) {
-				// upload the image if we have one
-				$_REQUEST['hush']='yeah'; //tell wall_upload function to return img info instead of echo
-				require_once('mod/wall_upload.php');
-				$media = wall_upload_post($a);
-				if(strlen($media)>0)
-					$_REQUEST['body'] .= "\n\n".$media;
+			// Check for throttling (maximum posts per day, week and month)
+			$throttle_day = get_config('system','throttle_limit_day');
+			if ($throttle_day > 0) {
+				$datefrom = date("Y-m-d H:i:s", time() - 24*60*60);
+
+				$r = q("SELECT COUNT(*) AS `posts_day` FROM `item` WHERE `uid`=%d AND `wall`
+					AND `created` > '%s' AND `id` = `parent`",
+					intval(api_user()), dbesc($datefrom));
+
+				if ($r)
+					$posts_day = $r[0]["posts_day"];
+				else
+					$posts_day = 0;
+
+				if ($posts_day > $throttle_day) {
+					logger('Daily posting limit reached for user '.api_user(), LOGGER_DEBUG);
+					die(api_error($a, $type, sprintf(t("Daily posting limit of %d posts reached. The post was rejected."), $throttle_day)));
+				}
 			}
+
+			$throttle_week = get_config('system','throttle_limit_week');
+			if ($throttle_week > 0) {
+				$datefrom = date("Y-m-d H:i:s", time() - 24*60*60*7);
+
+				$r = q("SELECT COUNT(*) AS `posts_week` FROM `item` WHERE `uid`=%d AND `wall`
+					AND `created` > '%s' AND `id` = `parent`",
+					intval(api_user()), dbesc($datefrom));
+
+				if ($r)
+					$posts_week = $r[0]["posts_week"];
+				else
+					$posts_week = 0;
+
+				if ($posts_week > $throttle_week) {
+					logger('Weekly posting limit reached for user '.api_user(), LOGGER_DEBUG);
+					die(api_error($a, $type, sprintf(t("Weekly posting limit of %d posts reached. The post was rejected."), $throttle_week)));
+				}
+			}
+
+			$throttle_month = get_config('system','throttle_limit_month');
+			if ($throttle_month > 0) {
+				$datefrom = date("Y-m-d H:i:s", time() - 24*60*60*30);
+
+				$r = q("SELECT COUNT(*) AS `posts_month` FROM `item` WHERE `uid`=%d AND `wall`
+					AND `created` > '%s' AND `id` = `parent`",
+					intval(api_user()), dbesc($datefrom));
+
+				if ($r)
+					$posts_month = $r[0]["posts_month"];
+				else
+					$posts_month = 0;
+
+				if ($posts_month > $throttle_month) {
+					logger('Monthly posting limit reached for user '.api_user(), LOGGER_DEBUG);
+					die(api_error($a, $type, sprintf(t("Monthly posting limit of %d posts reached. The post was rejected."), $throttle_month)));
+				}
+			}
+
+			$_REQUEST['type'] = 'wall';
+		}
+
+		if(x($_FILES,'media')) {
+			// upload the image if we have one
+			$_REQUEST['hush']='yeah'; //tell wall_upload function to return img info instead of echo
+			require_once('mod/wall_upload.php');
+			$media = wall_upload_post($a);
+			if(strlen($media)>0)
+				$_REQUEST['body'] .= "\n\n".$media;
 		}
 
 		// set this so that the item_post() function is quiet and doesn't redirect or emit json
 
 		$_REQUEST['api_source'] = true;
+
+		if (!x($_REQUEST, "source"))
+			$_REQUEST["source"] = api_source();
 
 		// call out normal post function
 
@@ -746,7 +848,7 @@
 		// get last public wall message
 		$lastwall = q("SELECT `item`.*, `i`.`contact-id` as `reply_uid`, `i`.`author-link` AS `item-author`
 				FROM `item`, `item` as `i`
-				WHERE `item`.`contact-id` = %d
+				WHERE `item`.`contact-id` = %d AND `item`.`uid` = %d
 					AND ((`item`.`author-link` IN ('%s', '%s')) OR (`item`.`owner-link` IN ('%s', '%s')))
 					AND `i`.`id` = `item`.`parent`
 					AND `item`.`type`!='activity'
@@ -754,6 +856,7 @@
 				ORDER BY `item`.`created` DESC
 				LIMIT 1",
 				intval($user_info['cid']),
+				intval(api_user()),
 				dbesc($user_info['url']),
 				dbesc(normalise_link($user_info['url'])),
 				dbesc($user_info['url']),
@@ -795,8 +898,10 @@
 				$in_reply_to_screen_name = NULL;
 			}
 
+			$converted = api_convert_item($item);
+
 			$status_info = array(
-				'text' => trim(html2plain(bbcode(api_clean_plain_items($lastwall['body']), false, false, 2, true), 0)),
+				'text' => $converted["text"],
 				'truncated' => false,
 				'created_at' => api_date($lastwall['created']),
 				'in_reply_to_status_id' => $in_reply_to_status_id,
@@ -808,19 +913,17 @@
 				'in_reply_to_user_id_str' => $in_reply_to_user_id_str,
 				'in_reply_to_screen_name' => $in_reply_to_screen_name,
 				'geo' => NULL,
-				'favorited' => false,
-				// attachments
+				'favorited' => $lastwall['starred'] ? true : false,
 				'user' => $user_info,
-				'statusnet_html'		=> trim(bbcode($lastwall['body'], false, false)),
+				'statusnet_html'		=> $converted["html"],
 				'statusnet_conversation_id'	=> $lastwall['parent'],
 			);
 
-			if ($lastwall['title'] != "")
-				$status_info['statusnet_html'] = "<h4>".bbcode($lastwall['title'])."</h4>\n".$status_info['statusnet_html'];
+			if (count($converted["attachments"]) > 0)
+				$status_info["attachments"] = $converted["attachments"];
 
-			$entities = api_get_entitities($status_info['text'], $lastwall['body']);
-			if (count($entities) > 0)
-				$status_info['entities'] = $entities;
+			if (count($converted["entities"]) > 0)
+				$status_info["entities"] = $converted["entities"];
 
 			if (($lastwall['item_network'] != "") AND ($status["source"] == 'web'))
 				$status_info["source"] = network_to_name($lastwall['item_network']);
@@ -894,8 +997,11 @@
 					}
 				}
 			}
+
+			$converted = api_convert_item($item);
+
 			$user_info['status'] = array(
-				'text' => trim(html2plain(bbcode(api_clean_plain_items($lastwall['body']), false, false, 2, true), 0)),
+				'text' => $converted["text"],
 				'truncated' => false,
 				'created_at' => api_date($lastwall['created']),
 				'in_reply_to_status_id' => $in_reply_to_status_id,
@@ -907,17 +1013,16 @@
 				'in_reply_to_user_id_str' => $in_reply_to_user_id_str,
 				'in_reply_to_screen_name' => $in_reply_to_screen_name,
 				'geo' => NULL,
-				'favorited' => false,
-				'statusnet_html'		=> trim(bbcode($lastwall['body'], false, false)),
+				'favorited' => $lastwall['starred'] ? true : false,
+				'statusnet_html'		=> $converted["html"],
 				'statusnet_conversation_id'	=> $lastwall['parent'],
 			);
 
-			if ($lastwall['title'] != "")
-				$user_info['statusnet_html'] = "<h4>".bbcode($lastwall['title'])."</h4>\n".$user_info['statusnet_html'];
+			if (count($converted["attachments"]) > 0)
+				$user_info["status"]["attachments"] = $converted["attachments"];
 
-			$entities = api_get_entitities($user_info['text'], $lastwall['body']);
-			if (count($entities) > 0)
-				$user_info['entities'] = $entities;
+			if (count($converted["entities"]) > 0)
+				$user_info["status"]["entities"] = $converted["entities"];
 
 			if (($lastwall['item_network'] != "") AND ($user_info["status"]["source"] == 'web'))
 				$user_info["status"]["source"] = network_to_name($lastwall['item_network']);
@@ -1024,15 +1129,14 @@
 
 		$ret = api_format_items($r,$user_info);
 
-		// We aren't going to try to figure out at the item, group, and page
-		// level which items you've seen and which you haven't. If you're looking
-		// at the network timeline just mark everything seen. 
+		// Set all posts from the query above to seen
+		$idarray = array();
+		foreach ($r AS $item)
+			$idarray[] = intval($item["id"]);
 
-		$r = q("UPDATE `item` SET `unseen` = 0 
-			WHERE `unseen` = 1 AND `uid` = %d",
-			//intval($user_info['uid'])
-			intval(api_user())
-		);
+		$idlist = implode(",", $idarray);
+
+		$r = q("UPDATE `item` SET `unseen` = 0 WHERE `unseen` AND `id` IN (%s)", $idlist);
 
 
 		$data = array('$statuses' => $ret);
@@ -1122,7 +1226,7 @@
 	api_register_func('api/statuses/public_timeline','api_statuses_public_timeline', true);
 
 	/**
-	 * 
+	 *
 	 */
 	function api_statuses_show(&$a, $type){
 		if (api_user()===false) return false;
@@ -1300,6 +1404,9 @@
 			$_REQUEST['type'] = 'wall';
 			$_REQUEST['api_source'] = true;
 
+			if (!x($_REQUEST, "source"))
+				$_REQUEST["source"] = api_source();
+
 			require_once('mod/item.php');
 			item_post($a);
 		}
@@ -1340,9 +1447,9 @@
 	api_register_func('api/statuses/destroy','api_statuses_destroy', true);
 
 	/**
-	 * 
+	 *
 	 * http://developer.twitter.com/doc/get/statuses/mentions
-	 * 
+	 *
 	 */
 	function api_statuses_mentions(&$a, $type){
 		if (api_user()===false) return false;
@@ -1387,7 +1494,7 @@
 			AND `item`.`visible` = 1 and `item`.`moderated` = 0 AND `item`.`deleted` = 0
 			AND `contact`.`id` = `item`.`contact-id`
 			AND `contact`.`blocked` = 0 AND `contact`.`pending` = 0
-			AND `item`.`parent` IN (SELECT `iid` from thread where uid = %d AND `mention`)
+			AND `item`.`parent` IN (SELECT `iid` from thread where uid = %d AND `mention` AND !`ignored`)
 			$sql_extra
 			AND `item`.`id`>%d
 			ORDER BY `item`.`id` DESC LIMIT %d ,%d ",
@@ -1489,6 +1596,69 @@
 	api_register_func('api/statuses/user_timeline','api_statuses_user_timeline', true);
 
 
+	/**
+	 * Star/unstar an item
+	 * param: id : id of the item
+	 *
+	 * api v1 : https://web.archive.org/web/20131019055350/https://dev.twitter.com/docs/api/1/post/favorites/create/%3Aid
+	 */
+	function api_favorites_create_destroy(&$a, $type){
+		if (api_user()===false) return false;
+
+		# for versioned api.
+		# TODO: we need a better global soluton
+		$action_argv_id=2;
+		if ($a->argv[1]=="1.1") $action_argv_id=3;
+
+		if ($a->argc<=$action_argv_id) die(api_error($a, $type, t("Invalid request.")));
+		$action = str_replace(".".$type,"",$a->argv[$action_argv_id]);
+		if ($a->argc==$action_argv_id+2) {
+			$itemid = intval($a->argv[$action_argv_id+1]);
+		} else {
+			$itemid = intval($_REQUEST['id']);
+		}
+
+		$item = q("SELECT * FROM item WHERE id=%d AND uid=%d",
+				$itemid, api_user());
+
+		if ($item===false || count($item)==0) die(api_error($a, $type, t("Invalid item.")));
+
+		switch($action){
+			case "create":
+				$item[0]['starred']=1;
+				break;
+			case "destroy":
+				$item[0]['starred']=0;
+				break;
+			default:
+				die(api_error($a, $type, t("Invalid action. ".$action)));
+		}
+		$r = q("UPDATE item SET starred=%d WHERE id=%d AND uid=%d",
+				$item[0]['starred'], $itemid, api_user());
+
+		q("UPDATE thread SET starred=%d WHERE iid=%d AND uid=%d",
+			$item[0]['starred'], $itemid, api_user());
+
+		if ($r===false) die(api_error($a, $type, t("DB error")));
+
+
+		$user_info = api_get_user($a);
+		$rets = api_format_items($item,$user_info);
+		$ret = $rets[0];
+
+		$data = array('$status' => $ret);
+		switch($type){
+			case "atom":
+			case "rss":
+				$data = api_rss_extra($a, $data, $user_info);
+		}
+
+		return api_apply_template("status", $type, $data);
+	}
+
+	api_register_func('api/favorites/create', 'api_favorites_create_destroy', true);
+	api_register_func('api/favorites/destroy', 'api_favorites_create_destroy', true);
+
 	function api_favorites(&$a, $type){
 		global $called_api;
 
@@ -1524,7 +1694,7 @@
 				`contact`.`network`, `contact`.`thumb`, `contact`.`dfrn-id`, `contact`.`self`,
 				`contact`.`id` AS `cid`, `contact`.`uid` AS `contact-uid`
 				FROM `item`, `contact`
-				WHERE `item`.`uid` = %d AND `verb` = '%s'
+				WHERE `item`.`uid` = %d
 				AND `item`.`visible` = 1 and `item`.`moderated` = 0 AND `item`.`deleted` = 0
 				AND `item`.`starred` = 1
 				AND `contact`.`id` = `item`.`contact-id`
@@ -1533,7 +1703,6 @@
 				AND `item`.`id`>%d
 				ORDER BY `item`.`id` DESC LIMIT %d ,%d ",
 				intval(api_user()),
-				dbesc(ACTIVITY_POST),
 				intval($since_id),
 				intval($start),	intval($count)
 			);
@@ -1553,6 +1722,9 @@
 	}
 
 	api_register_func('api/favorites','api_favorites', true);
+
+
+
 
 	function api_format_as($a, $ret, $user_info) {
 
@@ -1659,6 +1831,67 @@
 		}
 
 		return $ret;
+	}
+
+	function api_convert_item($item) {
+
+		$body = $item['body'];
+		$attachments = api_get_attachments($body);
+
+		// Workaround for ostatus messages where the title is identically to the body
+		$html = bbcode(api_clean_plain_items($body), false, false, 2, true);
+		$statusbody = trim(html2plain($html, 0));
+
+		// handle data: images
+		$statusbody = api_format_items_embeded_images($item,$statusbody);
+
+		$statustitle = trim($item['title']);
+
+		if (($statustitle != '') and (strpos($statusbody, $statustitle) !== false))
+			$statustext = trim($statusbody);
+		else
+			$statustext = trim($statustitle."\n\n".$statusbody);
+
+		if (($item["network"] == NETWORK_FEED) and (strlen($statustext)> 1000))
+			$statustext = substr($statustext, 0, 1000)."... \n".$item["plink"];
+
+		$statushtml = trim(bbcode($body, false, false));
+
+		if ($item['title'] != "")
+			$statushtml = "<h4>".bbcode($item['title'])."</h4>\n".$statushtml;
+
+		$entities = api_get_entitities($statustext, $body);
+
+		return(array("text" => $statustext, "html" => $statushtml, "attachments" => $attachments, "entities" => $entities));
+	}
+
+	function api_get_attachments(&$body) {
+
+		$text = $body;
+		$text = preg_replace("/\[img\=([0-9]*)x([0-9]*)\](.*?)\[\/img\]/ism", '[img]$3[/img]', $text);
+
+		$URLSearchString = "^\[\]";
+		$ret = preg_match_all("/\[img\]([$URLSearchString]*)\[\/img\]/ism", $text, $images);
+
+		if (!$ret)
+			return false;
+
+		require_once("include/Photo.php");
+
+		$attachments = array();
+
+		foreach ($images[1] AS $image) {
+			$imagedata = get_photo_info($image);
+
+			if ($imagedata)
+				$attachments[] = array("url" => $image, "mimetype" => $imagedata["mime"], "size" => $imagedata["size"]);
+		}
+
+		if (strstr($_SERVER['HTTP_USER_AGENT'], "AndStatus"))
+			foreach ($images[0] AS $orig)
+				$body = str_replace($orig, "", $body);
+
+		return $attachments;
 	}
 
 	function api_get_entitities(&$text, $bbcode) {
@@ -1818,6 +2051,16 @@
 
 		return($entities);
 	}
+	function api_format_items_embeded_images($item, $text){
+		$a = get_app();
+		$text = preg_replace_callback(
+				"|data:image/([^;]+)[^=]+=*|m",
+				function($match) use ($a, $item) {
+					return $a->get_baseurl()."/display/".$item['guid'];
+				},
+				$text);
+		return $text;
+	}
 
 	function api_format_items($r,$user_info, $filter_user = false) {
 
@@ -1825,7 +2068,7 @@
 		$ret = Array();
 
 		foreach($r as $item) {
-			api_share_as_retweet($a, api_user(), $item);
+			api_share_as_retweet($item);
 
 			localize_item($item);
 			$status_user = api_item_get_user($a,$item);
@@ -1872,23 +2115,10 @@
 				$in_reply_to_status_id_str = NULL;
 			}
 
-			// Workaround for ostatus messages where the title is identically to the body
-			//$statusbody = trim(html2plain(bbcode(api_clean_plain_items($item['body']), false, false, 5, true), 0));
-			$html = bbcode(api_clean_plain_items($item['body']), false, false, 2, true);
-			$statusbody = trim(html2plain($html, 0));
-
-			$statustitle = trim($item['title']);
-
-			if (($statustitle != '') and (strpos($statusbody, $statustitle) !== false))
-				$statustext = trim($statusbody);
-			else
-				$statustext = trim($statustitle."\n\n".$statusbody);
-
-			if (($item["network"] == NETWORK_FEED) and (strlen($statustext)> 1000))
-				$statustext = substr($statustext, 0, 1000)."... \n".$item["plink"];
+			$converted = api_convert_item($item);
 
 			$status = array(
-				'text'		=> $statustext,
+				'text'		=> $converted["text"],
 				'truncated' => False,
 				'created_at'=> api_date($item['created']),
 				'in_reply_to_status_id' => $in_reply_to_status_id,
@@ -1901,19 +2131,17 @@
 				'in_reply_to_screen_name' => $in_reply_to_screen_name,
 				'geo' => NULL,
 				'favorited' => $item['starred'] ? true : false,
-				//'attachments' => array(),
 				'user' =>  $status_user ,
 				//'entities' => NULL,
-				'statusnet_html'		=> trim(bbcode($item['body'], false, false)),
+				'statusnet_html'		=> $converted["html"],
 				'statusnet_conversation_id'	=> $item['parent'],
 			);
 
-			if ($item['title'] != "")
-				$status['statusnet_html'] = "<h4>".bbcode($item['title'])."</h4>\n".$status['statusnet_html'];
+			if (count($converted["attachments"]) > 0)
+				$status["attachments"] = $converted["attachments"];
 
-			$entities = api_get_entitities($status['text'], $item['body']);
-			if (count($entities) > 0)
-				$status['entities'] = $entities;
+			if (count($converted["entities"]) > 0)
+				$status["entities"] = $converted["entities"];
 
 			if (($item['item_network'] != "") AND ($status["source"] == 'web'))
 				$status["source"] = network_to_name($item['item_network']);
@@ -2226,13 +2454,6 @@
 	function api_direct_messages_box(&$a, $type, $box) {
 		if (api_user()===false) return false;
 
-		unset($_REQUEST["user_id"]);
-		unset($_GET["user_id"]);
-
-		unset($_REQUEST["screen_name"]);
-		unset($_GET["screen_name"]);
-
-		$user_info = api_get_user($a);
 
 		// params
 		$count = (x($_GET,'count')?$_GET['count']:20);
@@ -2242,11 +2463,25 @@
 		$since_id = (x($_REQUEST,'since_id')?$_REQUEST['since_id']:0);
 		$max_id = (x($_REQUEST,'max_id')?$_REQUEST['max_id']:0);
 
-		$start = $page*$count;
+		$user_id = (x($_REQUEST,'user_id')?$_REQUEST['user_id']:"");
+		$screen_name = (x($_REQUEST,'screen_name')?$_REQUEST['screen_name']:"");
 
+		//  caller user info
+		unset($_REQUEST["user_id"]);
+		unset($_GET["user_id"]);
+
+		unset($_REQUEST["screen_name"]);
+		unset($_GET["screen_name"]);
+
+		$user_info = api_get_user($a);
 		//$profile_url = $a->get_baseurl() . '/profile/' . $a->user['nickname'];
 		$profile_url = $user_info["url"];
 
+
+		// pagination
+		$start = $page*$count;
+
+		// filters
 		if ($box=="sentbox") {
 			$sql_extra = "`mail`.`from-url`='".dbesc( $profile_url )."'";
 		}
@@ -2263,11 +2498,19 @@
 		if ($max_id > 0)
 			$sql_extra .= ' AND `mail`.`id` <= '.intval($max_id);
 
+		if ($user_id !="") {
+			$sql_extra .= ' AND `mail`.`contact-id` = ' . intval($user_id);
+		}
+		elseif($screen_name !=""){
+			$sql_extra .= " AND `contact`.`nick` = '" . dbesc($screen_name). "'";
+		}
+
 		$r = q("SELECT `mail`.*, `contact`.`nurl` AS `contact-url` FROM `mail`,`contact` WHERE `mail`.`contact-id` = `contact`.`id` AND `mail`.`uid`=%d AND $sql_extra AND `mail`.`id` > %d ORDER BY `mail`.`id` DESC LIMIT %d,%d",
 				intval(api_user()),
 				intval($since_id),
 				intval($start),	intval($count)
 		);
+
 
 		$ret = Array();
 		foreach($r as $item) {
@@ -2275,12 +2518,11 @@
 				$recipient = $user_info;
 				$sender = api_get_user($a,normalise_link($item['contact-url']));
 			}
-			elseif ($box == "sentbox" || $item['from-url'] != $profile_url){
+			elseif ($box == "sentbox" || $item['from-url'] == $profile_url){
 				$recipient = api_get_user($a,normalise_link($item['contact-url']));
 				$sender = $user_info;
 
 			}
-
 			$ret[]=api_format_messages($item, $recipient, $sender);
 		}
 
@@ -2370,7 +2612,7 @@
 			echo json_encode($r[0]);
 		}
 
-		killme();	
+		killme();
 	}
 
 	api_register_func('api/friendica/photos/list', 'api_fr_photos_list', true);
@@ -2378,10 +2620,7 @@
 
 
 
-
-
-
-function api_share_as_retweet($a, $uid, &$item) {
+function api_share_as_retweet(&$item) {
 	$body = trim($item["body"]);
 
 	// Skip if it isn't a pure repeated messages
@@ -2425,6 +2664,15 @@ function api_share_as_retweet($a, $uid, &$item) {
 	if ($matches[1] != "")
 		$avatar = $matches[1];
 
+	$link = "";
+	preg_match("/link='(.*?)'/ism", $attributes, $matches);
+	if ($matches[1] != "")
+		$link = $matches[1];
+
+	preg_match('/link="(.*?)"/ism', $attributes, $matches);
+	if ($matches[1] != "")
+		$link = $matches[1];
+
 	$shared_body = preg_replace("/\[share(.*?)\]\s?(.*?)\s?\[\/share\]\s?/ism","$2",$body);
 
 	if (($shared_body == "") OR ($profile == "") OR ($author == "") OR ($avatar == ""))
@@ -2434,6 +2682,7 @@ function api_share_as_retweet($a, $uid, &$item) {
 	$item["author-name"] = $author;
 	$item["author-link"] = $profile;
 	$item["author-avatar"] = $avatar;
+	$item["plink"] = $link;
 
 	return(true);
 
@@ -2591,9 +2840,6 @@ function api_best_nickname(&$contacts) {
 
 /*
 Not implemented by now:
-favorites
-favorites/create
-favorites/destroy
 statuses/retweets_of_me
 friendships/create
 friendships/destroy

@@ -27,14 +27,14 @@
 		<dt>{{$plugins.0}}</dt>
 		
 		{{foreach $plugins.1 as $p}}
-			<dd>{{$p}}</dd>
+			<dd><a href="/admin/plugins/{{$p}}/">{{$p}}</a></dd>
 		{{/foreach}}
 		
 	</dl>
 
 	<dl>
 		<dt>{{$version.0}}</dt>
-		<dd>{{$version.1}} - {{$build}}</dt>
+		<dd> {{$platform}} '{{$codename}}' {{$version.1}} - {{$build}}</dt>
 	</dl>
 
 

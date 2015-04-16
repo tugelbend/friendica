@@ -24,33 +24,34 @@ if(!function_exists('deletenode')) {
 }
 
 function completeurl($url, $scheme) {
-        $urlarr = parse_url($url);
+	$urlarr = parse_url($url);
 
-        if (isset($urlarr["scheme"]))
-                return($url);
+	if (isset($urlarr["scheme"]))
+		return($url);
 
-        $schemearr = parse_url($scheme);
+	$schemearr = parse_url($scheme);
 
-        $complete = $schemearr["scheme"]."://".$schemearr["host"];
+	$complete = $schemearr["scheme"]."://".$schemearr["host"];
 
-        if (@$schemearr["port"] != "")
-                $complete .= ":".$schemearr["port"];
+	if (@$schemearr["port"] != "")
+		$complete .= ":".$schemearr["port"];
 
 		if(strpos($urlarr['path'],'/') !== 0)
 			$complete .= '/';
 
-        $complete .= $urlarr["path"];
+	$complete .= $urlarr["path"];
 
-        if (@$urlarr["query"] != "")
-                $complete .= "?".$urlarr["query"];
+	if (@$urlarr["query"] != "")
+		$complete .= "?".$urlarr["query"];
 
-        if (@$urlarr["fragment"] != "")
-                $complete .= "#".$urlarr["fragment"];
+	if (@$urlarr["fragment"] != "")
+		$complete .= "#".$urlarr["fragment"];
 
-        return($complete);
+	return($complete);
 }
 
 function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $count = 1) {
+	require_once("include/network.php");
 
 	$a = get_app();
 
@@ -63,13 +64,18 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 
 	$url = trim($url, "'");
 	$url = trim($url, '"');
+
+	$url = original_url($url);
+
 	$siteinfo["url"] = $url;
 	$siteinfo["type"] = "link";
+
+	$stamp1 = microtime(true);
 
 	$ch = curl_init();
 	curl_setopt($ch, CURLOPT_URL, $url);
 	curl_setopt($ch, CURLOPT_HEADER, 1);
-	curl_setopt($ch, CURLOPT_NOBODY, 0);
+	curl_setopt($ch, CURLOPT_NOBODY, 1);
 	curl_setopt($ch, CURLOPT_TIMEOUT, 3);
 	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 	//curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
@@ -77,8 +83,10 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 
 	$header = curl_exec($ch);
 	$curl_info = @curl_getinfo($ch);
-        $http_code = $curl_info['http_code'];
+	$http_code = $curl_info['http_code'];
 	curl_close($ch);
+
+	$a->save_timestamp($stamp1, "network");
 
 	if ((($curl_info['http_code'] == "301") OR ($curl_info['http_code'] == "302") OR ($curl_info['http_code'] == "303") OR ($curl_info['http_code'] == "307"))
 		AND (($curl_info['redirect_url'] != "") OR ($curl_info['location'] != ""))) {
@@ -97,6 +105,32 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 		if ($oembed_data->type != "error")
 			$siteinfo["type"] = $oembed_data->type;
 	}
+
+	// if the file is too large then exit
+	if ($curl_info["download_content_length"] > 1000000)
+		return($siteinfo);
+
+	// if it isn't a HTML file then exit
+	if (($curl_info["content_type"] != "") AND !strstr(strtolower($curl_info["content_type"]),"html"))
+		return($siteinfo);
+
+	$stamp1 = microtime(true);
+
+	// Now fetch the body as well
+	$ch = curl_init();
+	curl_setopt($ch, CURLOPT_URL, $url);
+	curl_setopt($ch, CURLOPT_HEADER, 1);
+	curl_setopt($ch, CURLOPT_NOBODY, 0);
+	curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	curl_setopt($ch, CURLOPT_USERAGENT, $a->get_useragent());
+
+	$header = curl_exec($ch);
+	$curl_info = @curl_getinfo($ch);
+	$http_code = $curl_info['http_code'];
+	curl_close($ch);
+
+	$a->save_timestamp($stamp1, "network");
 
 	// Fetch the first mentioned charset. Can be in body or header
 	$charset = "";
@@ -139,25 +173,25 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	$xpath = new DomXPath($doc);
 
 	$list = $xpath->query("//meta[@content]");
-        foreach ($list as $node) {
-                $attr = array();
-                if ($node->attributes->length)
-                        foreach ($node->attributes as $attribute)
-                                $attr[$attribute->name] = $attribute->value;
+	foreach ($list as $node) {
+		$attr = array();
+		if ($node->attributes->length)
+			foreach ($node->attributes as $attribute)
+				$attr[$attribute->name] = $attribute->value;
 
-                if (@$attr["http-equiv"] == 'refresh') {
-                        $path = $attr["content"];
-                        $pathinfo = explode(";", $path);
-                        $content = "";
-                        foreach ($pathinfo AS $value) {
-                                if (substr(strtolower($value), 0, 4) == "url=")
-                                        $content = substr($value, 4);
-                        }
-                        if ($content != "") {
-                                $siteinfo = parseurl_getsiteinfo($content, $no_guessing, $do_oembed, ++$count);
-                                return($siteinfo);
-                        }
-                }
+		if (@$attr["http-equiv"] == 'refresh') {
+			$path = $attr["content"];
+			$pathinfo = explode(";", $path);
+			$content = "";
+			foreach ($pathinfo AS $value) {
+				if (substr(strtolower($value), 0, 4) == "url=")
+					$content = substr($value, 4);
+			}
+			if ($content != "") {
+				$siteinfo = parseurl_getsiteinfo($content, $no_guessing, $do_oembed, ++$count);
+				return($siteinfo);
+			}
+		}
 	}
 
 	//$list = $xpath->query("head/title");
@@ -170,8 +204,8 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	foreach ($list as $node) {
 		$attr = array();
 		if ($node->attributes->length)
-                        foreach ($node->attributes as $attribute)
-                                $attr[$attribute->name] = $attribute->value;
+			foreach ($node->attributes as $attribute)
+				$attr[$attribute->name] = $attribute->value;
 
 		$attr["content"] = trim(html_entity_decode($attr["content"], ENT_QUOTES, "UTF-8"));
 
@@ -182,6 +216,9 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 					break;
 				case "description":
 					$siteinfo["text"] = $attr["content"];
+					break;
+				case "thumbnail":
+					$siteinfo["image"] = $attr["content"];
 					break;
 				case "twitter:image":
 					$siteinfo["image"] = $attr["content"];
@@ -205,9 +242,21 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 				case "dc.description":
 					$siteinfo["text"] = $attr["content"];
 					break;
+				case "keywords":
+					$keywords = explode(",", $attr["content"]);
+					break;
+				case "news_keywords":
+					$keywords = explode(",", $attr["content"]);
+					break;
 			}
 		if ($siteinfo["type"] == "summary")
 			$siteinfo["type"] = "link";
+	}
+
+	if (isset($keywords)) {
+		$siteinfo["keywords"] = array();
+		foreach ($keywords as $keyword)
+			$siteinfo["keywords"][] = trim($keyword);
 	}
 
 	//$list = $xpath->query("head/meta[@property]");
@@ -215,8 +264,8 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	foreach ($list as $node) {
 		$attr = array();
 		if ($node->attributes->length)
-                        foreach ($node->attributes as $attribute)
-                                $attr[$attribute->name] = $attribute->value;
+			foreach ($node->attributes as $attribute)
+				$attr[$attribute->name] = $attribute->value;
 
 		$attr["content"] = trim(html_entity_decode($attr["content"], ENT_QUOTES, "UTF-8"));
 
@@ -244,12 +293,12 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	}
 
 	if ((@$siteinfo["image"] == "") AND !$no_guessing) {
-            $list = $xpath->query("//img[@src]");
-            foreach ($list as $node) {
-                $attr = array();
-                if ($node->attributes->length)
-                    foreach ($node->attributes as $attribute)
-                        $attr[$attribute->name] = $attribute->value;
+	    $list = $xpath->query("//img[@src]");
+	    foreach ($list as $node) {
+		$attr = array();
+		if ($node->attributes->length)
+		    foreach ($node->attributes as $attribute)
+			$attr[$attribute->name] = $attribute->value;
 
 			$src = completeurl($attr["src"], $url);
 			$photodata = @getimagesize($src);
@@ -268,7 +317,7 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 								"height"=>$photodata[1]);
 			}
 
- 		}
+		}
     } else {
 		$src = completeurl($siteinfo["image"], $url);
 
@@ -317,6 +366,8 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 
 	logger("parseurl_getsiteinfo: Siteinfo for ".$url." ".print_r($siteinfo, true), LOGGER_DEBUG);
 
+	call_hooks('getsiteinfo', $siteinfo);
+
 	return($siteinfo);
 }
 
@@ -354,6 +405,15 @@ function parse_url_content(&$a) {
 			array_walk($arr_tags,'arr_add_hashes');
 			$str_tags = $br . implode(' ',$arr_tags) . $br;
 		}
+	}
+
+	// add url scheme if missing
+	$arrurl = parse_url($url);
+	if (!x($arrurl, 'scheme')) {
+		if (x($arrurl, 'host'))
+			$url = "http:".$url;
+		else
+			$url = "http://".$url;
 	}
 
 	logger('parse_url: ' . $url);
@@ -394,14 +454,24 @@ function parse_url_content(&$a) {
 
 	$siteinfo = parseurl_getsiteinfo($url);
 
+//	if ($textmode) {
+//		require_once("include/items.php");
+//
+//		echo add_page_info_data($siteinfo);
+//		killme();
+//	}
+
 	$url= $siteinfo["url"];
+
+	// If the link contains BBCode stuff, make a short link out of this to avoid parsing problems
+	if (strpos($url, '[') OR strpos($url, ']')) {
+		require_once("include/network.php");
+		$url = short_link($url);
+	}
 
 	$sitedata = "";
 
-	if($siteinfo["title"] == "") {
-		$sitedata .= sprintf($template,$url,$url,'') . $str_tags;
-		killme();
-	} else {
+	if($siteinfo["title"] != "") {
 		$text = $siteinfo["text"];
 		$title = $siteinfo["title"];
 	}
